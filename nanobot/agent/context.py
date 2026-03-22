@@ -152,13 +152,40 @@ Reply directly with text for conversations. Only use the 'message' tool to send 
             p = Path(path)
             if not p.is_file():
                 continue
-            raw = p.read_bytes()
-            # Detect real MIME type from magic bytes; fallback to filename guess
-            mime = detect_image_mime(raw) or mimetypes.guess_type(path)[0]
-            if not mime or not mime.startswith("image/"):
-                continue
-            b64 = base64.b64encode(raw).decode()
-            images.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}})
+
+            try:
+                # Try to open and compress image
+                from PIL import Image
+                import io
+
+                with Image.open(p) as img:
+                    # Convert to RGB if necessary
+                    if img.mode in ('RGBA', 'P'):
+                        img = img.convert('RGB')
+
+                    # Resize if too large (max 1024px on longest side)
+                    max_size = 1024
+                    if max(img.size) > max_size:
+                        ratio = max_size / max(img.size)
+                        new_size = (int(img.size[0] * ratio), int(img.size[1] * ratio))
+                        img = img.resize(new_size, Image.Resampling.LANCZOS)
+
+                    # Save to buffer with compression
+                    buffer = io.BytesIO()
+                    img.save(buffer, format="JPEG", quality=85)
+                    compressed_bytes = buffer.getvalue()
+
+                    # Encode to base64
+                    b64 = base64.b64encode(compressed_bytes).decode()
+                    images.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
+
+            except Exception as e:
+                # Fallback: read raw file
+                raw = p.read_bytes()
+                mime = detect_image_mime(raw) or mimetypes.guess_type(path)[0]
+                if mime and mime.startswith("image/"):
+                    b64 = base64.b64encode(raw).decode()
+                    images.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}})
 
         if not images:
             return text

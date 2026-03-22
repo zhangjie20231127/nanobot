@@ -19,6 +19,7 @@ from nanobot.agent.subagent import SubagentManager
 from nanobot.agent.tools.cron import CronTool
 from nanobot.agent.skills import BUILTIN_SKILLS_DIR
 from nanobot.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
+from nanobot.agent.tools.medical import MedicalPerceptionTool
 from nanobot.agent.tools.message import MessageTool
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.agent.tools.shell import ExecTool
@@ -131,6 +132,7 @@ class AgentLoop:
         self.tools.register(SpawnTool(manager=self.subagents))
         if self.cron_service:
             self.tools.register(CronTool(self.cron_service))
+        self.tools.register(MedicalPerceptionTool())
 
     async def _connect_mcp(self) -> None:
         """Connect to configured MCP servers (one-time, lazy)."""
@@ -179,16 +181,89 @@ class AgentLoop:
             return f'{tc.name}("{val[:40]}…")' if len(val) > 40 else f'{tc.name}("{val}")'
         return ", ".join(_fmt(tc) for tc in tool_calls)
 
+    @staticmethod
+    def _extract_media_paths_from_result(result: str) -> list[str]:
+        """Extract image paths from tool result for multimodal processing.
+
+        Detects JSON results containing preview_image_path field pointing to
+        an existing image file.
+        """
+        import json
+        from pathlib import Path
+
+        media_paths = []
+
+        try:
+            data = json.loads(result)
+        except json.JSONDecodeError:
+            return media_paths
+
+        if isinstance(data, dict):
+            # Check for preview_image_path field (from medical tool)
+            image_path = data.get("preview_image_path")
+            if image_path:
+                path = Path(image_path)
+                if path.exists() and path.is_file():
+                    suffix = path.suffix.lower()
+                    if suffix in ('.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.tiff', '.tif'):
+                        media_paths.append(str(path))
+
+        return media_paths
+
+    def _rebuild_messages_with_media(self, messages: list[dict], media_paths: list[str]) -> list[dict]:
+        """Rebuild messages to include media paths for multimodal processing.
+
+        This is called when tool results contain image paths that need to be
+        processed as media (not just text).
+        """
+        if not media_paths:
+            return messages
+
+        # Find the last user message or tool result that could be associated with these images
+        # We'll add the media to the most recent user message or create a new one
+        new_messages = list(messages)
+
+        # Find the last user message
+        for i in range(len(new_messages) - 1, -1, -1):
+            if new_messages[i].get("role") == "user":
+                # Add media to this message
+                existing_content = new_messages[i].get("content", "")
+
+                # Build multimodal content with media
+                multimodal_content = []
+
+                # Add image URLs
+                for path in media_paths:
+                    multimodal_content.append({
+                        "type": "image_url",
+                        "image_url": {"url": f"file://{path}"}
+                    })
+
+                # Add the text content
+                if isinstance(existing_content, str):
+                    multimodal_content.append({
+                        "type": "text",
+                        "text": existing_content
+                    })
+
+                new_messages[i]["content"] = multimodal_content
+                break
+
+        return new_messages
+
     async def _run_agent_loop(
         self,
         initial_messages: list[dict],
         on_progress: Callable[..., Awaitable[None]] | None = None,
+        media: list[str] | None = None,
     ) -> tuple[str | None, list[str], list[dict]]:
         """Run the agent iteration loop."""
         messages = initial_messages
         iteration = 0
         final_content = None
         tools_used: list[str] = []
+        # Track all media paths (initial + extracted from tool results)
+        all_media: list[str] = list(media) if media else []
 
         while iteration < self.max_iterations:
             iteration += 1
@@ -225,6 +300,13 @@ class AgentLoop:
                     args_str = json.dumps(tool_call.arguments, ensure_ascii=False)
                     logger.info("Tool call: {}({})", tool_call.name, args_str[:200])
                     result = await self.tools.execute(tool_call.name, tool_call.arguments)
+
+                    # Extract media paths from tool result (e.g., medical images)
+                    media_paths = self._extract_media_paths_from_result(result)
+                    if media_paths:
+                        extracted_media.extend(media_paths)
+                        logger.info("Extracted media paths from tool result: {}", media_paths)
+
                     messages = self.context.add_tool_result(
                         messages, tool_call.id, tool_call.name, result
                     )
@@ -250,7 +332,7 @@ class AgentLoop:
                 "without completing the task. You can try breaking the task into smaller steps."
             )
 
-        return final_content, tools_used, messages
+        return final_content, tools_used, messages, all_media
 
     async def run(self) -> None:
         """Run the agent loop, dispatching messages as tasks to stay responsive to /stop."""
@@ -377,6 +459,9 @@ class AgentLoop:
         key = session_key or msg.session_key
         session = self.sessions.get_or_create(key)
 
+        # Track media paths from various sources
+        media_paths: list[str] = list(msg.media) if msg.media else []
+
         # Slash commands
         cmd = msg.content.strip().lower()
         if cmd == "/new":
@@ -422,7 +507,7 @@ class AgentLoop:
         initial_messages = self.context.build_messages(
             history=history,
             current_message=msg.content,
-            media=msg.media if msg.media else None,
+            media=media_paths if media_paths else None,
             channel=msg.channel, chat_id=msg.chat_id,
         )
 
@@ -434,8 +519,8 @@ class AgentLoop:
                 channel=msg.channel, chat_id=msg.chat_id, content=content, metadata=meta,
             ))
 
-        final_content, _, all_msgs = await self._run_agent_loop(
-            initial_messages, on_progress=on_progress or _bus_progress,
+        final_content, _, all_msgs, extracted_media = await self._run_agent_loop(
+            initial_messages, on_progress=on_progress or _bus_progress, media=media_paths,
         )
 
         if final_content is None:

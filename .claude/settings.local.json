@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(dir /s /b D:pycharmnanobot*.py)",
+      "Bash(findstr /i /c:\"agent\" /c:\"loop\" /c:\"tools\" /c:\"config\" /c:\"bus\")",
+      "Bash(conda run:*)",
+      "Bash(python:*)",
+      "Bash(nanobot agent:*)",
+      "Bash(timeout 10 nanobot gateway)",
+      "Read(//c/Users/zhang/anaconda3/**)",
+      "Read(//mnt/c/Users/zhang/anaconda3/**)",
+      "Bash(find /c -name python.exe -path *nanobot*)",
+      "Bash(python3:*)",
+      "Bash(git check-ignore:*)",
+      "Bash(pip show:*)",
+      "Bash(where nanobot:*)",
+      "Read(//d/software/anaconda/Lib/site-packages/nanobot//**)",
+      "Read(//c/ProgramData/anaconda3/Lib/site-packages/**)",
+      "Read(//d/software/anaconda/**)",
+      "Bash(git remote:*)",
+      "Bash(git add:*)"
+    ]
+  }
+}
